@@ -1,5 +1,6 @@
 import https from 'https';
 import zlib from 'zlib';
+import forge from 'node-forge';
 import { XMLParser } from 'fast-xml-parser';
 
 export type AmbienteSefaz = '1' | '2'; // 1 = Produção, 2 = Homologação
@@ -73,9 +74,29 @@ export function montarEnvelopeSoapDistDFe(params: {
  * Cria um https.Agent em memória para conexão TLS mútua com os webservices da SEFAZ.
  */
 export function criarAgenteTlsSefaz(pfx: Buffer, passphrase: string): https.Agent {
+  // Converte o .pfx para PEM com node-forge. Passar o .pfx direto ao Node 22 (OpenSSL 3)
+  // falha com "Unsupported PKCS12 PFX data" em muitos certificados A1 (criptografia RC2/3DES).
+  const p12 = forge.pkcs12.pkcs12FromAsn1(
+    forge.asn1.fromDer(forge.util.createBuffer(pfx.toString('binary'))),
+    false,
+    passphrase
+  );
+  const keyBag =
+    p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag]?.[0] ||
+    p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag]?.[0];
+  const certs = (p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [])
+    .map((b) => b.cert)
+    .filter((c): c is forge.pki.Certificate => Boolean(c));
+  if (!keyBag?.key || certs.length === 0) {
+    throw new Error('Certificado sem chave privada ou sem certificado do titular.');
+  }
+  // O certificado do titular (não-AC) vai primeiro na cadeia.
+  const ehAC = (c: forge.pki.Certificate) => Number(Boolean((c.getExtension('basicConstraints') as { cA?: boolean } | null)?.cA));
+  certs.sort((a, b) => ehAC(a) - ehAC(b));
+
   return new https.Agent({
-    pfx,
-    passphrase,
+    key: forge.pki.privateKeyToPem(keyBag.key),
+    cert: certs.map((c) => forge.pki.certificateToPem(c)).join('\n'),
     rejectUnauthorized: false, // Cadeia ICP-Brasil da SEFAZ requer verificação flexível no cliente Node
     keepAlive: true,
     timeout: 30000,

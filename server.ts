@@ -10,15 +10,15 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
-  // Rotas de API do Baixador de XML NF-e
+  // Rotas da API
   app.use('/api', nfeRoutes);
 
-  // Tratamento global de erros de upload (Multer) sem vazar dados sensíveis em logs
+  // Tratamento de erros do multer
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         res.status(400).json({
-          erro: 'Arquivo excede o tamanho máximo permitido (5 MB para certificado .pfx/.p12 e 10 MB para CSV).',
+          erro: 'Arquivo excede o tamanho máximo permitido (5 MB para certificado e 10 MB para CSV).',
         });
         return;
       }

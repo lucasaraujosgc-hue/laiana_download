@@ -290,8 +290,8 @@ export function gerarRespostaSoapSimulada(params: ParametrosConsultaChave): stri
         <cUF>${chave.substring(0, 2)}</cUF>
         <natOp>VENDA DE MERCADORIA</natOp>
         <mod>55</mod>
-        <serie>${ parseInt(chave.substring(22, 25), 10) }</serie>
-        <nNF>${ parseInt(chave.substring(25, 34), 10) }</nNF>
+        <serie>${ parseInt(chave.substring(22, 25), 10) || 1 }</serie>
+        <nNF>${ parseInt(chave.substring(25, 34), 10) || 568 }</nNF>
         <dhEmi>${dadosNotaSimulacao?.dataEmissao || new Date().toISOString()}</dhEmi>
         <tpNF>1</tpNF>
         <tpAmb>${tpAmb}</tpAmb>

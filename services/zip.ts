@@ -23,6 +23,10 @@ function traduzirStatusRelatorio(status: StatusNota): string {
       return 'apenas resumo';
     case 'ignorada':
       return 'ignorada';
+    case 'aguardando':
+      return 'aguardando';
+    case 'processando':
+      return 'processando';
     case 'erro':
     default:
       return 'erro';

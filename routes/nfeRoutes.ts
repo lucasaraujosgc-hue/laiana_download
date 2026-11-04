@@ -59,6 +59,7 @@ export interface TarefaDownload {
     erros: number;
     ignoradas: number;
     concluido: boolean;
+    pausado: boolean;
     pausadoPor656: boolean;
     mensagemGeral: string;
     chaveAtual?: string;
@@ -68,6 +69,9 @@ export interface TarefaDownload {
   nomeArquivoZip: string;
   clientesSse: Set<Response>;
   cancelado: boolean;
+  pfxBuffer: Buffer;
+  senhaCertificado: string;
+  emExecucao: boolean;
 }
 
 const tarefasAtivas = new Map<string, TarefaDownload>();
@@ -77,6 +81,9 @@ setInterval(() => {
   const agora = Date.now();
   for (const [id, tarefa] of tarefasAtivas.entries()) {
     if (agora - tarefa.criadoEm > 30 * 60 * 1000) {
+      if (tarefa.pfxBuffer) {
+        tarefa.pfxBuffer.fill(0);
+      }
       tarefasAtivas.delete(id);
     }
   }
@@ -136,7 +143,6 @@ router.post(
         erro: err?.message || 'Erro ao validar o certificado digital.',
       });
     } finally {
-      // Limpa o buffer do certificado da memória imediatamente após a validação
       if (file?.buffer) {
         file.buffer.fill(0);
       }
@@ -186,8 +192,7 @@ router.post(
 
 /**
  * GET /api/exemplo/arquivos
- * Gera um certificado .pfx de demonstração + relatório CSV de exemplo (contendo a linha oficial da especificação)
- * para que o usuário possa testar toda a aplicação imediatamente.
+ * Gera um certificado .pfx de demonstração + relatório CSV de exemplo.
  */
 router.get('/exemplo/arquivos', (_req: Request, res: Response) => {
   try {
@@ -197,7 +202,6 @@ router.get('/exemplo/arquivos', (_req: Request, res: Response) => {
       senha: '123456',
     });
 
-    // Gera chaves válidas adicionais com DV calculado pelo Módulo 11
     const base2 = '2926106321099300014655002000000569101212627';
     const chave2 = `${base2}${calcularDigitoVerificador(base2)}`;
 
@@ -235,8 +239,6 @@ router.get('/exemplo/arquivos', (_req: Request, res: Response) => {
 
 /**
  * POST /api/lote/iniciar
- * Recebe o certificado (.pfx/.p12), senha, arquivo CSV, ambiente ('1' ou '2') e intervalo,
- * valida tudo em memória e inicia o processamento sequencial das chaves junto à SEFAZ.
  */
 router.post(
   '/lote/iniciar',
@@ -282,7 +284,6 @@ router.post(
       const dadosCert = lerCertificadoPfx(certFile.buffer, senha);
       const resultadoCsv = parseRelatorioCsv(csvFile.buffer, dadosCert.cnpj);
 
-      // Copia o buffer do PFX apenas para criar o https.Agent em memória
       const pfxCopiaMemoria = Buffer.from(certFile.buffer);
       certFile.buffer.fill(0);
       csvFile.buffer.fill(0);
@@ -312,6 +313,7 @@ router.post(
           erros: resultadoCsv.notas.filter((n) => n.status === 'erro').length,
           ignoradas: resultadoCsv.notas.filter((n) => n.status === 'ignorada').length,
           concluido: false,
+          pausado: false,
           pausadoPor656: false,
           mensagemGeral: 'Iniciando comunicação TLS mútua com a SEFAZ...',
         },
@@ -319,14 +321,16 @@ router.post(
         nomeArquivoZip,
         clientesSse: new Set(),
         cancelado: false,
+        pfxBuffer: pfxCopiaMemoria,
+        senhaCertificado: senha,
+        emExecucao: false,
       };
 
       tarefasAtivas.set(jobId, tarefa);
 
       // Dispara o processamento assíncrono em memória
-      processarLoteEmMemoria(tarefa, pfxCopiaMemoria, senha).catch(() => {
-        // Garantir descarte seguro em caso de exceção inesperada
-        pfxCopiaMemoria.fill(0);
+      processarLoteEmMemoria(tarefa).catch(() => {
+        tarefa.emExecucao = false;
       });
 
       res.json({
@@ -346,12 +350,79 @@ router.post(
   }
 );
 
-async function processarLoteEmMemoria(
-  tarefa: TarefaDownload,
-  pfxBuffer: Buffer,
-  senha: string
-): Promise<void> {
-  const agent = criarAgenteTlsSefaz(pfxBuffer, senha);
+/**
+ * POST /api/lote/:jobId/pausar
+ * Pausa o download das notas em lote mantendo os dados baixados até agora.
+ */
+router.post('/lote/:jobId/pausar', async (req: Request, res: Response) => {
+  const tarefa = tarefasAtivas.get(String(req.params.jobId));
+  if (!tarefa) {
+    res.status(404).json({ erro: 'Tarefa não encontrada.' });
+    return;
+  }
+
+  tarefa.progresso.pausado = true;
+  tarefa.progresso.mensagemGeral = 'Download pausado pelo usuário. Você pode retomar ou baixar o .ZIP parcial.';
+
+  // Gera o buffer do zip parcial com o que já foi baixado
+  try {
+    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
+  } catch {
+    // ignorar falha ao pré-gerar zip parcial
+  }
+
+  emitirEventoSse(tarefa, 'progresso', {
+    progresso: tarefa.progresso,
+  });
+
+  res.json({
+    sucesso: true,
+    progresso: tarefa.progresso,
+    xmlsBaixadosAteAgora: tarefa.xmlsBaixados.length,
+  });
+});
+
+/**
+ * POST /api/lote/:jobId/retomar
+ * Retoma o download de onde parou.
+ */
+router.post('/lote/:jobId/retomar', (req: Request, res: Response) => {
+  const tarefa = tarefasAtivas.get(String(req.params.jobId));
+  if (!tarefa) {
+    res.status(404).json({ erro: 'Tarefa não encontrada.' });
+    return;
+  }
+
+  if (tarefa.progresso.concluido) {
+    res.status(400).json({ erro: 'Este lote já foi totalmente concluído.' });
+    return;
+  }
+
+  tarefa.progresso.pausado = false;
+  tarefa.progresso.pausadoPor656 = false;
+  tarefa.progresso.mensagemGeral = 'Retomando download das notas pendentes...';
+
+  emitirEventoSse(tarefa, 'progresso', {
+    progresso: tarefa.progresso,
+  });
+
+  if (!tarefa.emExecucao) {
+    processarLoteEmMemoria(tarefa).catch(() => {
+      tarefa.emExecucao = false;
+    });
+  }
+
+  res.json({
+    sucesso: true,
+    progresso: tarefa.progresso,
+  });
+});
+
+async function processarLoteEmMemoria(tarefa: TarefaDownload): Promise<void> {
+  if (tarefa.emExecucao) return;
+  tarefa.emExecucao = true;
+
+  const agent = criarAgenteTlsSefaz(tarefa.pfxBuffer, tarefa.senhaCertificado);
 
   try {
     const notasParaConsultar = tarefa.notas.filter((n) => n.processar);
@@ -359,12 +430,23 @@ async function processarLoteEmMemoria(
     for (let i = 0; i < notasParaConsultar.length; i++) {
       if (tarefa.cancelado) break;
 
+      // Se o usuário solicitou pausa, interrompe a iteração
+      if (tarefa.progresso.pausado) {
+        break;
+      }
+
       const nota = notasParaConsultar[i];
+
+      // Se já foi baixada com sucesso ou resolvida anteriormente, pula
+      if (nota.status === 'baixado' || nota.status === 'nao_encontrado' || nota.status === 'apenas_resumo') {
+        continue;
+      }
+
       nota.status = 'processando';
       nota.mensagemSefaz = 'Consultando NFeDistribuicaoDFe na SEFAZ...';
       tarefa.progresso.chaveAtual = nota.chave;
-      tarefa.progresso.mensagemGeral = `Consultando NF-e ${nota.numero} (${i + 1} de ${
-        notasParaConsultar.length
+      tarefa.progresso.mensagemGeral = `Consultando NF-e ${nota.numero} (${tarefa.progresso.processadas + 1} de ${
+        tarefa.progresso.totalParaProcessar
       })...`;
 
       emitirEventoSse(tarefa, 'progresso', {
@@ -379,7 +461,7 @@ async function processarLoteEmMemoria(
         tpAmb: tarefa.ambiente,
         agent,
         timeoutMs: 30000,
-        maxTentativas: 3, // Até 2 novas tentativas em caso de erro de rede
+        maxTentativas: 3,
         simularSefaz: tarefa.simularSefaz,
         dadosNotaSimulacao: {
           numero: nota.numero,
@@ -391,11 +473,23 @@ async function processarLoteEmMemoria(
         },
       });
 
+      // Se pausou durante a requisição assíncrona
+      if (tarefa.progresso.pausado) {
+        nota.status = 'aguardando';
+        nota.mensagemSefaz = 'Aguardando retomada do download...';
+        emitirEventoSse(tarefa, 'progresso', {
+          progresso: tarefa.progresso,
+          notaAtualizada: nota,
+        });
+        break;
+      }
+
       // Tratamento especial para cStat 656 (Consumo Indevido): pausa o lote imediatamente
       if (resultado.status === 'consumo_indevido' || resultado.cStat === '656') {
         nota.status = 'erro';
-        nota.mensagemSefaz = `656 - ${resultado.xMotivo} (Lote interrompido para evitar bloqueio)`;
+        nota.mensagemSefaz = `656 - ${resultado.xMotivo} (Lote pausado para evitar bloqueio)`;
         tarefa.progresso.erros++;
+        tarefa.progresso.pausado = true;
         tarefa.progresso.pausadoPor656 = true;
         tarefa.progresso.mensagemGeral =
           'Alerta SEFAZ (cStat 656 - Consumo Indevido): O lote foi pausado automaticamente. Aguarde cerca de 1 hora antes de tentar consultar novamente.';
@@ -437,34 +531,44 @@ async function processarLoteEmMemoria(
       });
 
       // Aguarda o intervalo configurável entre consultas (padrão 2 segundos), exceto após a última nota
-      if (i < notasParaConsultar.length - 1 && !tarefa.cancelado) {
+      if (i < notasParaConsultar.length - 1 && !tarefa.cancelado && !tarefa.progresso.pausado) {
         await new Promise((r) => setTimeout(r, tarefa.intervaloMs));
       }
     }
 
-    // Gera o arquivo .zip em memória ao final do processamento
-    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
-    tarefa.progresso.concluido = true;
-    tarefa.progresso.chaveAtual = undefined;
+    // Se completou todas as notas autorizadas
+    const aindaTemPendentes = tarefa.notas.some(
+      (n) => n.processar && (n.status === 'aguardando' || n.status === 'processando')
+    );
 
-    if (!tarefa.progresso.pausadoPor656) {
+    if (!aindaTemPendentes && !tarefa.progresso.pausado) {
+      tarefa.progresso.concluido = true;
+      tarefa.progresso.chaveAtual = undefined;
       tarefa.progresso.mensagemGeral = `Processamento concluído: ${tarefa.progresso.baixadas} XML(s) completo(s) baixado(s). Arquivo ZIP pronto.`;
     }
 
-    emitirEventoSse(tarefa, 'concluido', {
-      progresso: tarefa.progresso,
-      nomeArquivoZip: tarefa.nomeArquivoZip,
-    });
+    // Sempre atualiza o buffer zip com os XMLs que já estão disponíveis
+    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
+
+    if (tarefa.progresso.concluido) {
+      emitirEventoSse(tarefa, 'concluido', {
+        progresso: tarefa.progresso,
+        nomeArquivoZip: tarefa.nomeArquivoZip,
+      });
+    } else {
+      emitirEventoSse(tarefa, 'progresso', {
+        progresso: tarefa.progresso,
+        nomeArquivoZip: tarefa.nomeArquivoZip,
+      });
+    }
   } finally {
-    // Descarta de forma segura o certificado e destrói conexões TLS abertas
-    pfxBuffer.fill(0);
+    tarefa.emExecucao = false;
     agent.destroy();
   }
 }
 
 /**
  * GET /api/lote/:jobId/eventos
- * Stream de Server-Sent Events (SSE) com o progresso em tempo real de cada nota.
  */
 router.get('/lote/:jobId/eventos', (req: Request, res: Response) => {
   const tarefa = tarefasAtivas.get(String(req.params.jobId));
@@ -478,7 +582,6 @@ router.get('/lote/:jobId/eventos', (req: Request, res: Response) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
 
-  // Envia o estado inicial imediatamente
   res.write(
     `event: estado_inicial\ndata: ${JSON.stringify({
       progresso: tarefa.progresso,
@@ -496,7 +599,6 @@ router.get('/lote/:jobId/eventos', (req: Request, res: Response) => {
 
 /**
  * GET /api/lote/:jobId/status
- * Endpoint de polling como fallback caso SSE sofra buffering.
  */
 router.get('/lote/:jobId/status', (req: Request, res: Response) => {
   const tarefa = tarefasAtivas.get(String(req.params.jobId));
@@ -514,24 +616,37 @@ router.get('/lote/:jobId/status', (req: Request, res: Response) => {
 
 /**
  * GET /api/lote/:jobId/download
- * Devolve o arquivo .zip gerado em memória contendo os XMLs ({chave}-procNFe.xml) e o relatorio.csv.
+ * Devolve o arquivo .zip gerado em memória (parcial ou concluído).
  */
-router.get('/lote/:jobId/download', (req: Request, res: Response) => {
+router.get('/lote/:jobId/download', async (req: Request, res: Response) => {
   const tarefa = tarefasAtivas.get(String(req.params.jobId));
-  if (!tarefa || !tarefa.zipBuffer) {
+  if (!tarefa) {
     res.status(404).json({
-      erro: 'Arquivo ZIP ainda não está disponível ou a sessão expirou.',
+      erro: 'Tarefa de download não encontrada ou a sessão expirou.',
     });
     return;
   }
 
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${tarefa.nomeArquivoZip}"`
-  );
-  res.setHeader('Content-Length', tarefa.zipBuffer.length);
-  res.send(tarefa.zipBuffer);
+  try {
+    // Se o zipBuffer ainda não foi gerado ou está desatualizado, gera agora com os XMLs atuais
+    let buffer = tarefa.zipBuffer;
+    if (!buffer || buffer.length === 0) {
+      buffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
+      tarefa.zipBuffer = buffer;
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${tarefa.nomeArquivoZip}"`
+    );
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err: any) {
+    res.status(500).json({
+      erro: err?.message || 'Erro ao gerar o arquivo ZIP.',
+    });
+  }
 });
 
 export default router;

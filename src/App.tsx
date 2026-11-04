@@ -6,6 +6,8 @@ import {
   KeyRound,
   Download,
   Play,
+  Pause,
+  RotateCw,
   CheckCircle2,
   AlertTriangle,
   XCircle,
@@ -88,6 +90,7 @@ interface ProgressoLote {
   erros: number;
   ignoradas: number;
   concluido: boolean;
+  pausado: boolean;
   pausadoPor656: boolean;
   mensagemGeral: string;
   chaveAtual?: string;
@@ -130,6 +133,8 @@ export default function App() {
 
   // Estado de Execução do Lote e SSE
   const [processandoLote, setProcessandoLote] = useState<boolean>(false);
+  const [pausando, setPausando] = useState<boolean>(false);
+  const [retomando, setRetomando] = useState<boolean>(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [nomeArquivoZip, setNomeArquivoZip] = useState<string>('');
   const [progresso, setProgresso] = useState<ProgressoLote | null>(null);
@@ -171,7 +176,6 @@ export default function App() {
         setSimularSefaz(true);
       }
 
-      // Se já houver CSV carregado, revalida a prévia com o CNPJ do certificado recém-lido
       if (arquivoCsv) {
         await carregarPreviaCsv(arquivoCsv, data.certificado.cnpj);
       }
@@ -255,7 +259,6 @@ export default function App() {
         return;
       }
 
-      // Converte Base64 em File (.pfx)
       const binStr = atob(data.certificadoBase64);
       const bytes = new Uint8Array(binStr.length);
       for (let i = 0; i < binStr.length; i++) {
@@ -330,6 +333,53 @@ export default function App() {
     }
   };
 
+  const pausarDownload = async () => {
+    if (!jobId || pausando) return;
+    setPausando(true);
+    try {
+      const resp = await fetch(`/api/lote/${jobId}/pausar`, { method: 'POST' });
+      const data = await resp.json();
+      if (data.progresso) {
+        setProgresso(data.progresso);
+      }
+      setProcessandoLote(false);
+    } catch {
+      setErroGeral('Não foi possível pausar o download no servidor.');
+    } finally {
+      setPausando(false);
+    }
+  };
+
+  const retornarDeOndeParou = async () => {
+    if (!jobId || retomando) return;
+    setRetomando(true);
+    setProcessandoLote(true);
+    try {
+      const resp = await fetch(`/api/lote/${jobId}/retomar`, { method: 'POST' });
+      const data = await resp.json();
+      if (data.progresso) {
+        setProgresso(data.progresso);
+      }
+      conectarStreamEventos(jobId);
+    } catch {
+      setProcessandoLote(false);
+      setErroGeral('Não foi possível retomar o download no servidor.');
+    } finally {
+      setRetomando(false);
+    }
+  };
+
+  const baixarZipParaComputador = () => {
+    if (!jobId) return;
+    const url = `/api/lote/${jobId}/download`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = nomeArquivoZip || 'XML_NFe.zip';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const conectarStreamEventos = (idTarefa: string) => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
@@ -343,6 +393,9 @@ export default function App() {
       setProgresso(payload.progresso);
       if (payload.notas) setNotas(payload.notas);
       if (payload.nomeArquivoZip) setNomeArquivoZip(payload.nomeArquivoZip);
+      if (payload.progresso?.pausado || payload.progresso?.concluido) {
+        setProcessandoLote(false);
+      }
     });
 
     es.addEventListener('progresso', (ev: MessageEvent) => {
@@ -352,6 +405,9 @@ export default function App() {
         setNotas((prev) =>
           prev.map((n) => (n.id === payload.notaAtualizada.id ? payload.notaAtualizada : n))
         );
+      }
+      if (payload.progresso?.pausado) {
+        setProcessandoLote(false);
       }
     });
 
@@ -364,12 +420,10 @@ export default function App() {
     });
 
     es.onerror = () => {
-      // Fallback para polling caso SSE seja encerrado
       es.close();
     };
   };
 
-  // Fallback de polling enquanto processandoLote estiver ativo
   useEffect(() => {
     if (!processandoLote || !jobId) return;
     const timer = setInterval(async () => {
@@ -379,11 +433,11 @@ export default function App() {
         const data = await resp.json();
         setProgresso(data.progresso);
         if (data.notas) setNotas(data.notas);
-        if (data.progresso?.concluido) {
+        if (data.progresso?.concluido || data.progresso?.pausado) {
           setProcessandoLote(false);
         }
       } catch {
-        // Ignora falha transitória de rede no polling
+        // Ignora falha transitória
       }
     }, 2000);
 
@@ -454,7 +508,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-      {/* Top Bar Contract: 3 zonas separadas por gap-8 */}
+      {/* Top Bar Contract */}
       <header className="bg-white border-b border-slate-200 px-6 py-4 sticky top-0 z-20">
         <div className="max-w-[1360px] mx-auto flex items-center justify-between gap-8">
           <a
@@ -499,7 +553,7 @@ export default function App() {
       </header>
 
       <main className="flex-1 max-w-[1360px] w-full mx-auto px-6 py-8 space-y-8">
-        {/* Cabeçalho da Área de Trabalho */}
+        {/* Cabeçalho */}
         <section id="configuracao" className="space-y-2">
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
             <div>
@@ -524,15 +578,15 @@ export default function App() {
           >
             <XCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
             <div className="flex-1">
-              <p className="font-semibold">Não foi possível prosseguir</p>
+              <p className="font-semibold">Aviso do Sistema</p>
               <p className="text-red-800 mt-0.5">{erroGeral}</p>
             </div>
           </div>
         )}
 
-        {/* Grade de Configuração: Passo 1 (Certificado), Passo 2 (CSV), Passo 3 (Ambiente e Ação) */}
+        {/* Grade de Configuração */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-          {/* 1. Certificado Digital A1 (.pfx / .p12) */}
+          {/* 1. Certificado Digital */}
           <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between space-y-5">
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -626,7 +680,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Resultado da Leitura do Certificado */}
             <div className="pt-3 border-t border-slate-100">
               {erroCertificado ? (
                 <div className="flex items-start gap-2.5 text-xs text-red-700 bg-red-50/80 border border-red-200 rounded-lg p-3">
@@ -666,7 +719,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* 2. Upload do Relatório CSV */}
+          {/* 2. Upload do CSV */}
           <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between space-y-5">
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -710,7 +763,7 @@ export default function App() {
                   Colunas esperadas: <span className="font-mono text-[11px]">Numero NF-e; CNPJ/CPF; Razao Social; Data de Emissao; Data de Autorizacao; Valor; Chave; UF; Situacao; Tipo Operacao;</span>
                 </p>
                 <p>
-                  Remove apóstrofo inicial da chave, valida 44 dígitos (Módulo 11) e ignora duplicadas ou não autorizadas.
+                  Remove apóstrofo inicial da chave, valida 44 dígitos (Módulo 11) e ignora duplicadas ou canceladas.
                 </p>
               </div>
             </div>
@@ -758,11 +811,11 @@ export default function App() {
             </div>
           </div>
 
-          {/* 3. Ambiente SEFAZ e Execução */}
+          {/* 3. Ambiente SEFAZ e Controles de Execução */}
           <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between space-y-5">
             <div className="space-y-4">
               <h2 className="text-base font-semibold text-slate-900">
-                03. Ambiente e Consulta
+                03. Ambiente e Execução
               </h2>
 
               <div>
@@ -832,41 +885,66 @@ export default function App() {
               </label>
             </div>
 
+            {/* Painel de Botões: Iniciar / Pausar / Retomar / Baixar ZIP para Computador */}
             <div className="pt-3 border-t border-slate-100 space-y-2.5">
-              <button
-                type="button"
-                onClick={iniciarDownloadXmls}
-                disabled={!podeIniciarDownload}
-                className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-              >
-                {processandoLote ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Consultando SEFAZ...</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>Baixar XMLs</span>
-                  </>
-                )}
-              </button>
+              {!jobId || (!processandoLote && !progresso?.pausado && !progresso?.concluido) ? (
+                <button
+                  type="button"
+                  onClick={iniciarDownloadXmls}
+                  disabled={!podeIniciarDownload}
+                  className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <Play className="w-4 h-4 fill-current" />
+                  <span>Baixar XMLs</span>
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  {processandoLote && (
+                    <button
+                      type="button"
+                      onClick={pausarDownload}
+                      disabled={pausando}
+                      className="w-full py-2.5 px-4 text-sm font-semibold text-slate-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+                    >
+                      <Pause className="w-4 h-4 fill-current" />
+                      <span>{pausando ? 'Pausando...' : 'Pausar Download'}</span>
+                    </button>
+                  )}
 
-              {progresso?.concluido && jobId && (
-                <a
-                  href={`/api/lote/${jobId}/download`}
-                  download={nomeArquivoZip}
-                  className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0"
+                  {!processandoLote && progresso?.pausado && !progresso?.concluido && (
+                    <button
+                      type="button"
+                      onClick={retornarDeOndeParou}
+                      disabled={retomando}
+                      className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+                    >
+                      <RotateCw className={`w-4 h-4 ${retomando ? 'animate-spin' : ''}`} />
+                      <span>{retomando ? 'Retomando...' : 'Retornar de Onde Parou'}</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Botão para iniciar o download do .zip para o computador (disponível quando houver tarefa ativa ou concluída) */}
+              {jobId && (
+                <button
+                  type="button"
+                  onClick={baixarZipParaComputador}
+                  className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Baixar Arquivo .ZIP</span>
-                </a>
+                  <span>
+                    {progresso?.concluido
+                      ? 'Baixar ZIP para meu Computador'
+                      : `Baixar ZIP (${progresso?.baixadas || 0} baixados até agora)`}
+                  </span>
+                </button>
               )}
             </div>
           </div>
         </section>
 
-        {/* Barra de Progresso em Tempo Real (quando em execução ou concluído) */}
+        {/* Barra de Progresso e Painel de Controle de Execução */}
         {progresso && (
           <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -875,37 +953,66 @@ export default function App() {
                   <span className="text-sm font-semibold text-slate-900">
                     {progresso.concluido
                       ? 'Processamento do Lote Finalizado'
+                      : progresso.pausado
+                      ? 'Download Pausado'
                       : 'Processando Lote junto ao Ambiente Nacional SEFAZ'}
                   </span>
                   <span className="text-xs font-mono tabular-nums text-slate-500">
                     ({progresso.processadas}/{progresso.totalParaProcessar} consultadas · {percentualProgresso}%)
                   </span>
+                  {progresso.pausado && !progresso.concluido && (
+                    <span className="text-[11px] font-medium text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
+                      Pausa ativa
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-slate-600">{progresso.mensagemGeral}</p>
               </div>
 
-              {progresso.concluido && jobId && (
-                <div className="flex items-center gap-3 shrink-0">
-                  <span className="text-xs font-mono text-slate-500 hidden sm:inline">
-                    {nomeArquivoZip}
-                  </span>
-                  <a
-                    href={`/api/lote/${jobId}/download`}
-                    download={nomeArquivoZip}
-                    className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+              {/* Controles rápidos no cabeçalho do progresso */}
+              <div className="flex items-center gap-2.5 shrink-0">
+                {processandoLote && (
+                  <button
+                    type="button"
+                    onClick={pausarDownload}
+                    disabled={pausando}
+                    className="px-3.5 py-1.5 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <FileArchive className="w-4 h-4" />
-                    <span>Baixar .ZIP ({progresso.baixadas} XMLs + relatorio.csv)</span>
-                  </a>
-                </div>
-              )}
+                    <Pause className="w-3.5 h-3.5 fill-current" />
+                    <span>Pausar</span>
+                  </button>
+                )}
+
+                {!processandoLote && progresso.pausado && !progresso.concluido && (
+                  <button
+                    type="button"
+                    onClick={retornarDeOndeParou}
+                    disabled={retomando}
+                    className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <RotateCw className={`w-3.5 h-3.5 ${retomando ? 'animate-spin' : ''}`} />
+                    <span>Retornar de Onde Parou</span>
+                  </button>
+                )}
+
+                {jobId && (
+                  <button
+                    type="button"
+                    onClick={baixarZipParaComputador}
+                    className="px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <FileArchive className="w-3.5 h-3.5" />
+                    <span>Baixar .ZIP</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Barra visual */}
             <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
               <div
                 className={`h-full transition-all duration-200 ${
-                  progresso.pausadoPor656
+                  progresso.pausadoPor656 || progresso.pausado
                     ? 'bg-amber-500'
                     : progresso.concluido
                     ? 'bg-emerald-600'
@@ -915,7 +1022,7 @@ export default function App() {
               />
             </div>
 
-            {/* Contadores de status em linha limpa */}
+            {/* Contadores */}
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-slate-600 pt-1 tabular-nums">
               <span>
                 <strong className="text-emerald-700 font-semibold">{progresso.baixadas}</strong> Baixada(s) (procNFe)
@@ -934,13 +1041,13 @@ export default function App() {
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                <strong className="text-slate-700 font-semibold">{progresso.ignoradas}</strong> Ignorada(s) (Canceladas/Denegadas)
+                <strong className="text-slate-700 font-semibold">{progresso.ignoradas}</strong> Ignorada(s)
               </span>
             </div>
           </section>
         )}
 
-        {/* Aviso de Divergência de CNPJ se houver */}
+        {/* Aviso de Divergência de CNPJ */}
         {totalAvisosCnpj > 0 && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-900">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
@@ -948,14 +1055,13 @@ export default function App() {
               <span className="font-semibold">
                 Aviso de divergência de CNPJ em {totalAvisosCnpj} nota(s):
               </span>{' '}
-              O CNPJ do emitente contido nas posições 7 a 20 da chave difere do CNPJ do certificado digital carregado. As notas marcadas com aviso ainda serão consultadas na SEFAZ conforme especificado.
+              O CNPJ contido na chave difere do CNPJ do certificado. As notas ainda serão consultadas normalmente.
             </div>
           </div>
         )}
 
         {/* Prévia em Tabela e Status por Nota */}
         <section id="previa-notas" className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          {/* Barra superior da tabela: Resumo + Filtros + Busca */}
           <div className="p-6 border-b border-slate-200 space-y-4">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
@@ -979,7 +1085,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* Controles de filtro e busca */}
               {notas.length > 0 && (
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
@@ -1042,7 +1147,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Corpo da Tabela */}
+          {/* Tabela de Notas */}
           {notas.length === 0 ? (
             <div className="py-16 px-6 text-center space-y-3">
               <FileSpreadsheet className="w-10 h-10 text-slate-300 mx-auto" />
@@ -1199,7 +1304,7 @@ export default function App() {
           )}
         </section>
 
-        {/* Especificações Técnicas da Integração SEFAZ */}
+        {/* Informações da Integração */}
         <section
           id="especificacoes"
           className="bg-white border border-slate-200 rounded-xl p-6 grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-slate-600"
@@ -1217,20 +1322,20 @@ export default function App() {
           <div className="space-y-1.5">
             <div className="flex items-center gap-2 text-slate-900 font-semibold">
               <Clock className="w-4 h-4 text-blue-600" />
-              <span>Controle de Limites e cStat 656</span>
+              <span>Pausa, Retomada e Limites SEFAZ</span>
             </div>
             <p className="leading-relaxed">
-              Consultas realizadas sequencialmente com intervalo padrão de 2s, timeout de 30s e até 2 retentativas automáticas de rede. Caso a SEFAZ retorne <code className="font-mono">cStat 656</code> (Consumo Indevido), o lote é pausado imediatamente.
+              Permite pausar e retomar o lote a qualquer momento de onde parou. Respeita o intervalo configurável (padrão 2s), timeout de 30s e pausa imediata se receber <code className="font-mono">cStat 656</code> (Consumo Indevido).
             </p>
           </div>
 
           <div className="space-y-1.5">
             <div className="flex items-center gap-2 text-slate-900 font-semibold">
               <FileArchive className="w-4 h-4 text-blue-600" />
-              <span>Pacote .ZIP Padronizado</span>
+              <span>Download Direto do ZIP</span>
             </div>
             <p className="leading-relaxed">
-              Gera o arquivo <code className="font-mono">XML_NFe_CNPJ_inicio_a_fim.zip</code> contendo os XMLs nomeados como <code className="font-mono">{'{chave}'}-procNFe.xml</code> e o <code className="font-mono">relatorio.csv</code> consolidado separado por ponto e vírgula.
+              O botão de download do .zip permite salvar no seu computador a qualquer momento o pacote com os XMLs <code className="font-mono">{'{chave}'}-procNFe.xml</code> já baixados e o <code className="font-mono">relatorio.csv</code> consolidado.
             </p>
           </div>
         </section>

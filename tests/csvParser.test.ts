@@ -101,7 +101,6 @@ describe('Parser do Relatório CSV de NF-e', () => {
     expect(nota).not.toBeNull();
     expect(nota?.cnpjDivergente).toBe(true);
     expect(nota?.avisoCnpj).toContain('63210993000146');
-    // Mesmo divergente, ainda deve tentar a consulta se for Autorizada
     expect(nota?.processar).toBe(true);
   });
 });

@@ -1,0 +1,6 @@
+{
+  "name": "Baixador de XML NF-e",
+  "description": "Sistema para consulta e download em lote de arquivos XML (procNFe) junto à SEFAZ via certificado digital A1 e relatório CSV.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -10,6 +10,8 @@ RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 
+ARG GIT_SHA=desconhecida
+ENV GIT_SHA=$GIT_SHA
 ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000

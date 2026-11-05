@@ -10,6 +10,11 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
+  // Versão em execução (Easypanel passa GIT_SHA no build)
+  app.get('/api/versao', (_req: Request, res: Response) => {
+    res.json({ versao: (process.env.GIT_SHA || 'desconhecida').slice(0, 7) });
+  });
+
   // Rotas da API
   app.use('/api', nfeRoutes);
 

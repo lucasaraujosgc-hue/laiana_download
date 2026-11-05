@@ -89,7 +89,8 @@ export function gerarNomeArquivoZip(
  */
 export async function gerarBufferZip(
   xmls: ItemZipXml[],
-  notas: NotaCsv[]
+  notas: NotaCsv[],
+  simulado = false
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const archive = criarArchiver('zip', {
@@ -110,7 +111,7 @@ export async function gerarBufferZip(
     for (const item of xmls) {
       if (item.chave && item.xml) {
         archive.append(Buffer.from(item.xml, 'utf8'), {
-          name: `${item.chave}-procNFe.xml`,
+          name: `${simulado ? 'SIMULADO-NAO-IMPORTAR-' : ''}${item.chave}-procNFe.xml`,
         });
       }
     }

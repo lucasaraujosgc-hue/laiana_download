@@ -130,6 +130,10 @@ export default function App() {
   const [ambiente, setAmbiente] = useState<'1' | '2'>('1'); // 1 = Produção (padrão), 2 = Homologação
   const [intervaloSegundos, setIntervaloSegundos] = useState<number>(2);
   const [simularSefaz, setSimularSefaz] = useState<boolean>(false);
+  const [versaoApp, setVersaoApp] = useState<string>('');
+  useEffect(() => {
+    fetch('/api/versao').then((r) => r.json()).then((d) => setVersaoApp(d.versao || '')).catch(() => {});
+  }, []);
 
   // Estado de Execução do Lote e SSE
   const [processandoLote, setProcessandoLote] = useState<boolean>(false);
@@ -561,6 +565,7 @@ export default function App() {
               <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900 mt-1">
                 Consulta e Download em Lote de XMLs (procNFe)
               </h1>
+              {versaoApp && <p className="text-xs text-slate-400 font-mono mt-1">versão {versaoApp}</p>}
             </div>
             <div className="text-xs text-slate-500 flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />

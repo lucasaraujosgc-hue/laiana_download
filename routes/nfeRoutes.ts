@@ -288,11 +288,14 @@ router.post(
       csvFile.buffer.fill(0);
 
       const jobId = crypto.randomUUID();
-      const nomeArquivoZip = gerarNomeArquivoZip(
+      const nomeArquivoZipBase = gerarNomeArquivoZip(
         dadosCert.cnpj,
         resultadoCsv.dataMaisAntiga,
         resultadoCsv.dataMaisRecente
       );
+      const nomeArquivoZip = dadosCert.isCertificadoTeste
+        ? `SIMULADO-${nomeArquivoZipBase}`
+        : nomeArquivoZipBase;
 
       const tarefa: TarefaDownload = {
         id: jobId,
@@ -367,7 +370,7 @@ router.post('/lote/:jobId/pausar', async (req: Request, res: Response) => {
 
   // Gera o buffer do zip parcial com o que já foi baixado
   try {
-    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
+    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas, tarefa.simularSefaz);
   } catch {
     // ignorar falha ao pré-gerar zip parcial
   }
@@ -549,7 +552,7 @@ async function processarLoteEmMemoria(tarefa: TarefaDownload): Promise<void> {
     }
 
     // Sempre atualiza o buffer zip com os XMLs que já estão disponíveis
-    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
+    tarefa.zipBuffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas, tarefa.simularSefaz);
 
     if (tarefa.progresso.concluido) {
       emitirEventoSse(tarefa, 'concluido', {
@@ -632,7 +635,7 @@ router.get('/lote/:jobId/download', async (req: Request, res: Response) => {
     // Se o zipBuffer ainda não foi gerado ou está desatualizado, gera agora com os XMLs atuais
     let buffer = tarefa.zipBuffer;
     if (!buffer || buffer.length === 0) {
-      buffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas);
+      buffer = await gerarBufferZip(tarefa.xmlsBaixados, tarefa.notas, tarefa.simularSefaz);
       tarefa.zipBuffer = buffer;
     }
 

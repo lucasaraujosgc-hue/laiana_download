@@ -172,9 +172,7 @@ export default function App() {
       }
 
       setDadosCertificado(data.certificado);
-      if (data.certificado?.isCertificadoTeste) {
-        setSimularSefaz(true);
-      }
+      setSimularSefaz(Boolean(data.certificado?.isCertificadoTeste));
 
       if (arquivoCsv) {
         await carregarPreviaCsv(arquivoCsv, data.certificado.cnpj);
@@ -871,18 +869,11 @@ export default function App() {
                 </select>
               </div>
 
-              <label className="flex items-start gap-2 pt-1 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={simularSefaz}
-                  onChange={(e) => setSimularSefaz(e.target.checked)}
-                  disabled={processandoLote}
-                  className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                />
-                <span className="text-xs text-slate-600 leading-snug">
-                  Simular resposta SOAP/GZIP da SEFAZ (para testar sem conexão ICP-Brasil real)
-                </span>
-              </label>
+              {dadosCertificado?.isCertificadoTeste && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2 leading-snug">
+                  Certificado de demonstração: as respostas da SEFAZ serão simuladas e os XMLs gerados são fictícios (não importe na contabilidade).
+                </p>
+              )}
             </div>
 
             {/* Painel de Botões: Iniciar / Pausar / Retomar / Baixar ZIP para Computador */}

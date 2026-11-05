@@ -257,7 +257,6 @@ router.post(
       1,
       Math.min(15, Number(req.body?.intervaloSegundos || 2))
     );
-    const simularSefaz = req.body?.simularSefaz === 'true';
 
     if (!certFile || !csvFile) {
       res.status(400).json({
@@ -299,7 +298,9 @@ router.post(
         id: jobId,
         criadoEm: Date.now(),
         ambiente,
-        simularSefaz: simularSefaz || Boolean(dadosCert.isCertificadoTeste),
+        // Simulação só existe para o certificado de demonstração. Certificado real
+        // SEMPRE consulta a SEFAZ (XMLs simulados não servem para importar na contabilidade).
+        simularSefaz: Boolean(dadosCert.isCertificadoTeste),
         intervaloMs: intervaloSegundos * 1000,
         certificado: dadosCert,
         resumoCsv: resultadoCsv,
